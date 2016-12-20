@@ -9,6 +9,7 @@
 #
 # Bugs/Features:
 #  - het commando wordt niet gegarandeerd elke x minuten uitgevoerd.
+#  - werkt alleen op Linux (bleh), en waarschijnlijk zelfs alleen op RHEL.
 #  - de helft of this scriptje is in het engels, en the other half is in
 #    the nederlands. 
 #
