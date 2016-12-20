@@ -96,7 +96,6 @@ while getopts :f:t:r:i:d:hD opt ; do
                 exit 1
             fi
             RUN_FREQUENCY=$OPTARG
-            exit 1
             ;;
         \?)
             echo "$0: Invalid option: $OPTARG" >&2
