@@ -1,0 +1,174 @@
+#!/bin/bash
+
+#
+# Dit scriptje (only one kenobi) zorgt ervoor dat een cronjob op meerdere
+# systemen aanwezig kan zijn, maar maar 1x uitgevoerd wordt.  Dit door een
+# lock file op NFS te zetten.
+#
+# Zie 'kenobi -h' voor opties.
+#
+# Bugs/Features:
+#  - het commando wordt niet gegarandeerd elke x minuten uitgevoerd.
+#  - de helft of this scriptje is in het engels, en the other half is in
+#    the nederlands. 
+#
+#
+# Hoe gebruik ik dit?
+# ===================
+# Voer kenobi elke minuut uit vanuit cron.  Via de "-r" optie stel je in hoe
+# vaak het daadwerkelijk uitgevoerd moet worden.
+#
+# Het maakt een lock bestandje aan in de directory die je opgeeft via
+# -d DIRECTORY.  Waarschijnlijk wil je dat dat een NFS pad is, maar je kan
+# dit script ook gebruiken op een enkele machine (al zou ik niet weten waarom).
+#
+# In het lockbestandje wordt een unieke id gezet voor dit proces (default is
+# dat de hostnaam + parent pid).  Als er minder dan TIMEOUT minuten verstreken
+# zijn sinds het lockbestand is bijgewerkt dan doen we (op deze instantie) niets.
+#
+# Als er meer dan TIMEOUT minuten verstreken zijn dan pikken we het lockbestand.
+#
+# Voorbeeldje:
+#
+# Zet het volgende commando in cron op 2 machines en laat het elke minuut draaien: 
+#
+#  kenobi -t 15 -r 5 -d /net/shared -- ls -ltr \; echo hoera
+#
+# Een van de 2 machines zal nu elke 5 minuten het "ls -ltr ; echo hoera" commando
+# gaan uitvoeren.  Als deze machine dood gaat dan gebeurt er tot ca. 15 minuten
+# helemaal niets, en daarna neemt de volgende machine het over.
+#
+
+# Defaults
+TIMEOUT=5
+RUN_FREQUENCY=1
+DEBUG=false
+ID=`hostname`-$PPID
+DIRECTORY=/var/run
+
+set -e
+set -o pipefail
+
+while getopts :f:t:r:i:d:hD opt ; do
+    case $opt in
+        h)
+            echo "Usage: $0 [-h | [-D] [-i ID] [-d DIRECTORY] [-t TIMEOUT] [-r RUNFREQUENCY]] COMMAND"
+            echo
+            echo "  -h                  Show this help."
+            echo "  -D                  Enable debugging."
+            echo "  -i ID               Set unique identifier* for this instance."
+            echo "  -d DIRECTORY        Use DIRECTORY to store lock (default: $DIRECTORY)."
+            echo "  -t TIMEOUT          Steal lock after TIMEOUT minutes (default: $TIMEOUT)."
+            echo "  -r RUNFREQUENCY     Run command every RUNFREQUENCY minutes (default: $RUN_FREQUENCY)."
+            echo
+            echo "  *) To order unique identifiers visit UniqueBits at https://www.uniq-id.nl/"
+            echo
+            exit 0
+            ;;
+        t)
+            if [ "$OPTARG" -le 0 -o "$OPTARG" -ge 60 ]; then
+                echo "$0: lock timeout should be between 0 and 60 minutes." >&2
+                exit 1
+            fi
+            TIMEOUT=$OPTARG
+            ;;
+        d)
+            if [ \! -d "$OPTARG" -o \! -w "$OPTARG" ]; then
+                echo "$0: $OPTARG is not a writeable path." >&2
+                exit 1
+            fi
+            DIRECTORY=$OPTARG
+            ;;
+        D)
+            DEBUG=true
+            ;;
+        i)
+            if [ -z "${OPTARG}" ]; then
+                echo "$0: ID can not be empty."
+                exit 1
+            fi
+            ID=$OPTARG
+            ;;
+        r)
+            if [ "$OPTARG" -le 0 -o "$OPTARG" -ge 120 ]; then
+                echo "$0: run frequency should be between 0 and 120 minutes." >&2
+                exit 1
+            fi
+            RUN_FREQUENCY=$OPTARG
+            exit 1
+            ;;
+        \?)
+            echo "$0: Invalid option: $OPTARG" >&2
+            exit 1
+            ;;
+        :)
+            echo "$0: $OPTARG requires an argument." >&2
+            exit 1
+            ;;
+    esac
+done
+
+opts=( "$@" )
+command=${opts[@]:$(($OPTIND-1))}
+
+if [ -z "${command}" ]; then
+    echo "Usage: $0 [-h | [-d] [-i ID] [-p POLLFREQUENCY] [-r RUNFREQUENCY]] COMMAND"
+    exit 1
+fi
+
+lockfile="$DIRECTORY/kenobi.`echo $command | md5sum | awk '{print $1;}'`"
+
+$DEBUG && echo "ID: $ID"
+$DEBUG && echo "Timeout: $TIMEOUT"
+$DEBUG && echo "Run frequency: $RUN_FREQUENCY"
+$DEBUG && echo "Command: $command"
+$DEBUG && echo "Lockfile: $lockfile"
+
+function touch_file() {
+    $DEBUG && echo "Taking ownership and updating lockfile timestamp."
+    echo "${ID}" > ${lockfile}
+    touch $lockfile
+    chmod 0600 "${lockfile}"
+}
+
+function run_job() {
+    $DEBUG && echo "Running job."
+
+    bash -c "${command}"
+
+    touch_file
+}
+
+
+# Success (0) als de job uitgevoerd moet worden.
+function poll() {
+    if [ \! -e "$lockfile" ]; then
+        $DEBUG && echo "File did not exist. Creating."
+        return 0
+    fi
+
+    base=`basename "${lockfile}"`
+    result=`find "${DIRECTORY}" -name "${base}" -type f -mmin -${RUN_FREQUENCY} 2>/dev/null`
+
+    if [ "${result}" = "${lockfile}" ]; then
+        $DEBUG && echo "Lockfile less than $RUN_FREQUENCY minutes old. Not running."
+        return 1
+    fi
+
+    if grep -q "${ID}" "${lockfile}"; then
+        $DEBUG && echo "Lockfile is ours. Updating."
+        return 0
+    fi
+        
+    result=`find "${DIRECTORY}" -name "${base}" -type f -mmin -${TIMEOUT} 2>/dev/null`
+    if [ "${result}" = "${lockfile}" ]; then
+        $DEBUG && echo "Lockfile less than $TIMEOUT minutes old. Not stealing."
+        return 1
+    fi
+
+    $DEBUG && echo "Lockfile is old. Stealing it."
+
+    return 0
+}
+
+poll && run_job
